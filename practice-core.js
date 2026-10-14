@@ -57,7 +57,11 @@
     }
     routeCache.set(key, found); return found;
   }
-  function missPlans(score, route, mode) {
+  function preferredRoute(score, mode, maxDarts, routes = []) {
+    const standard = routes.find(route => Array.isArray(route) && route.length <= maxDarts && validRoute(score, route, mode));
+    return standard ? [...standard] : generatedRoute(score, mode, maxDarts);
+  }
+  function missPlans(score, route, mode, routeProvider = () => []) {
     if (!route?.length) return [];
     const target = route[0];
     const ring = [20,1,18,4,13,6,10,15,2,17,3,19,7,16,8,11,14,9,12,5];
@@ -70,8 +74,9 @@
     } else if (target === 'BULL' && mode === 'sep_double') actual.push('SB');
     return actual.map(token => {
       const result = outcome(score, [token], mode);
-      const route = result.done ? null : generatedRoute(result.remaining, mode, 2);
-      const nextTurn = !result.done && !route ? generatedRoute(result.remaining, mode) : null;
+      const standards = routeProvider(result.remaining);
+      const route = result.done ? null : preferredRoute(result.remaining, mode, 2, standards);
+      const nextTurn = !result.done && !route ? preferredRoute(result.remaining, mode, 3, standards) : null;
       return { target, actual: token, ...result, route, nextTurn };
     });
   }
@@ -89,7 +94,7 @@
     const choices = prioritize && weak.length && random() < 0.7 ? weak : pool;
     return choices[Math.min(choices.length - 1, Math.floor(random() * choices.length))];
   }
-  const api = { MODES, normalize, validToken, value, finish, outcome, validRoute, generatedRoute, missPlans, candidates, nextSequential, select };
+  const api = { MODES, normalize, validToken, value, finish, outcome, validRoute, generatedRoute, preferredRoute, missPlans, candidates, nextSequential, select };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.PracticeCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

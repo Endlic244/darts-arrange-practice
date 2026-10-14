@@ -151,14 +151,19 @@ function updateExplanation(){
     steps.appendChild(step);
   });
   area.appendChild(steps);
-  const last=route.at(-1), finish=Core.value(last);
+  const last=route.at(-1), finish=Core.value(last), mode=currentMode();
   let tip;
-  if(last==='BULL') tip=currentMode()==='sep_double' ? '最後はブル50点。アウターブル25点では上がれません。' : '最後はブル50点。ファットブルでは内側・外側どちらでも上がれます。';
-  else if(last[0]==='D'){
-    const n=Number(last.slice(1));
-    tip=n%2===0 ? `${finish}点をD${n}で狙う形。S${n}に入っても${n}点が残り、次の投があればD${n/2}で上がれます。` : `${finish}点をD${n}で狙う形。S${n}だと奇数の${n}点が残り、ダブル1本では上がれません。`;
-  }else if(last[0]==='T') tip=`マスターアウトなら最後の${last}でも上がれます。シングルに入った場合は、残りを計算し直しましょう。`;
-  else tip=`シングルアウトなら最後の${last}で上がれます。残り${finish}点を取り切る形です。`;
+  if(last==='BULL') tip=mode==='sep_double' ? 'DOはインブル50点で上がり。アウターブルは25点です。' : 'ファットブルは内外とも50点。どちらでも上がれます。';
+  else {
+    const actual='S'+last.slice(1);
+    if(last[0]==='S') tip='シングルアウトなので、最後はシングルでも上がれます。';
+    else {
+      const left=finish-Core.value(actual), dartsLeft=3-route.length;
+      const recovery=Core.preferredRoute(left,mode,dartsLeft || 3,standardRoutes(left));
+      const when=dartsLeft ? `残り${dartsLeft}本` : '次ラウンド';
+      tip=`最後の${last}が${actual}なら残り${left}点。` + (recovery ? `${when}: ${recovery.join(' → ')}。` : `${when}では上がれません。`);
+    }
+  }
   const note=document.createElement('div');note.className='routeTip';note.textContent=tip;area.appendChild(note);
 }
 function updateRoutes(){
@@ -534,14 +539,14 @@ function updateMissPlans(){
   heading.textContent = `最初の${route[0]}を外した例（残り2本）`;
   area.appendChild(heading);
   const grid = document.createElement('div');grid.className='missGrid';area.appendChild(grid);
-  for(const plan of Core.missPlans(startScore, route, currentMode())){
+  for(const plan of Core.missPlans(startScore, route, currentMode(), score=>standardRoutes(score))){
     const item = document.createElement('div');item.className='missItem';
     const title = document.createElement('strong');
     title.textContent = `${plan.actual==='MISS' ? '得点なし' : plan.actual+'に入る'} → ${plan.done ? '' : '残り'+plan.remaining+'点'}`;
     const detail = document.createElement('p');
     detail.textContent = plan.done ? (plan.correct ? 'そのまま上がり' : plan.reason==='finish-rule' ? 'アウト条件違反。開始点数へ戻る。' : 'バースト。開始点数へ戻る。') : plan.route ? plan.route.join(' → ') : '残り2本では上がれません。';
     item.append(title,detail);
-    if(plan.nextTurn){const next=document.createElement('p');next.className='nextTurn';next.textContent='次ラウンド: '+plan.nextTurn.join(' → ');item.appendChild(next);}
+    if(plan.nextTurn){const next=document.createElement('p');next.className='nextTurn';next.textContent='この残りを3本で上がる例: '+plan.nextTurn.join(' → ');item.appendChild(next);}
     grid.appendChild(item);
   }
 }

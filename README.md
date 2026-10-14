@@ -1,62 +1,221 @@
-# ダーツ アレンジ練習 PWA
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const {spawn} = require('node:child_process');
+const path = require('node:path');
+const {once} = require('node:events');
+const {chromium, devices} = require('playwright');
 
-3本以内の上がり目を学習する、ビルド不要の静的Webアプリです。
+test('iPhone-sized PWA: range, rules, reversible stats, custom routes, persistence and offline launch', {timeout:60000}, async()=>{
+ const root=path.resolve(__dirname,'..');
+ const server=spawn('python3',['-u','-m','http.server','0','--bind','127.0.0.1','--directory',path.dirname(root)],{stdio:['ignore','pipe','ignore']});
+ let browser;
+ try{
+  const [line]=await once(server.stdout,'data');
+  const port=String(line).match(/port (\d+)/)[1];
+  const base=`http://127.0.0.1:${port}/${path.basename(root)}/`;
+  browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_PATH || '/usr/bin/chromium',args:['--no-sandbox']});
+  const context=await browser.newContext({...devices['iPhone 13'],defaultBrowserType:undefined});
+  let page=await context.newPage();
+  const errors=[]; const failed=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  page.on('response',r=>{if(r.status()>=400 && !r.url().endsWith('/favicon.ico')) failed.push(r.url());});
+  const ready=async()=>page.waitForFunction(()=>document.getElementById('currentScore').textContent!=='--');
+  await page.goto(base); await ready();
+  const screen = async(name)=>page.locator('#'+name+'Screen').isVisible();
+  const fits = async(name)=>{
+    const layout=await page.locator('#'+name+'Screen').evaluate(el=>({client:el.clientHeight,scroll:el.scrollHeight,bottom:el.getBoundingClientRect().bottom,height:innerHeight}));
+    assert.ok(layout.scroll<=layout.client+1,`${name} needs scrolling: ${JSON.stringify(layout)}`);
+    assert.ok(layout.bottom<=layout.height,`${name} leaves viewport`);
+  };
+  const settings = async()=>page.getByRole('button',{name:'設定',exact:true}).click();
+  const range = async(min,max,order='random')=>{
+    await settings();
+    await page.locator('#rangeMin').fill(String(min)); await page.locator('#rangeMax').fill(String(max));
+    await page.locator('#questionOrder').selectOption(order);
+    await page.getByRole('button',{name:'範囲を適用',exact:true}).click();
+  };
+  const chooseTarget = async(score)=>{
+    await page.getByRole('button',{name:'点数を選ぶ',exact:true}).click();
+    const min=score<=20 ? 2 : Math.floor((score-1)/20)*20+1;
+    const max=score<=20 ? 20 : min+19;
+    await page.locator('#scoreBands').getByRole('button',{name:`${min}〜${max}`,exact:true}).click();
+    await page.locator('#scoreChoices').getByRole('button',{name:String(score),exact:true}).click();
+    assert.equal(await page.locator('#scorePicker').isVisible(),false);
+  };
+  const enter=async(prefix,number)=>page.locator(`#dartboardHost [data-token="${prefix}${number}"]`).last().click();
+  const outerBull=async()=>{const target=page.locator('#dartboardHost [data-outer-bull]');const box=await target.boundingBox();await target.click({position:{x:box.width*.2,y:box.height*.5}});};
+  const submit=async()=>page.getByRole('button',{name:'回答する',exact:true}).click();
+  const next=async()=>page.getByRole('button',{name:'次の問題',exact:true}).click();
+  assert.equal(await page.evaluate(()=>checkoutByScore.size),179);
+  assert.equal(await page.locator('.dartBtn').count(),1);
+  assert.equal(await page.locator('.appNav button').last().textContent(),'設定');
+  assert.equal(await page.locator('#activeModeLabel').textContent(),'ダブルアウト');
+  assert.deepEqual(await page.locator('#dartboardHost text').allTextContents(),['20','1','18','4','13','6','10','15','2','17','3','19','7','16','8','11','14','9','12','5']);
+  assert.equal(await page.locator('#dartboardHost [data-token="D20"]').count(),1);
+  assert.equal(await page.locator('#dartboardHost [data-token="T20"]').count(),1);
+  assert.match(await page.locator('#dartboardHost [data-token="T20"]').getAttribute('d'),/A112,112.*A94,94/);
+  assert.match(await page.locator('#dartboardHost [data-token="D20"]').getAttribute('d'),/A174,174.*A154,154/);
 
-## 練習
+  assert.ok(await screen('practice')); await fits('practice');
+  for(const size of [{width:375,height:667},{width:320,height:568},{width:390,height:664}]){
+    await page.setViewportSize(size);await fits('practice');
+    await settings();await fits('settings');
+    await page.getByRole('button',{name:'練習',exact:true}).click();
+    const button=await page.locator('#submitAnswer').boundingBox();assert.ok(button.y+button.height<=size.height);
+  }
+  await page.setViewportSize({width:390,height:844});
+  await page.screenshot({path:'/tmp/darts-practice.png'});
+  await range(40,40);await enter('D',20);
+  assert.equal(await page.locator('.selectedHit').getAttribute('data-token'),'D20');
+  assert.equal(await page.locator('.selectedHit').evaluate(el=>getComputedStyle(el).fill),'rgb(250, 204, 21)');
+  assert.equal(await page.locator('#dartboardHost [data-outer-bull]').getAttribute('r'),'30');
 
-- DO（セパレートブル・ダブルアウト）、MO（ファットブル・マスターアウト）、既存のSO（ファットブル・シングルアウト）。DOはダブルまたはインナーブル、MOはダブル・トリプル・ブルで終了します。
-- 画面は「練習→回答結果→次の問題」と切り替わります。設定・成績・自分登録は別画面に切り替えます。組み立ての解説と外した例は同じ画面で表示します。外した例は1列で並べて比較でき、結果・組み立て・外した例は回答後に一画面で表示し、下部ボタンは「回答を直す・次の問題」で固定しています。
-- 点数帯プリセット（121〜170など）と2〜180の任意範囲。3本で上がれない点数は自動的に除外。
-- 出題順はランダム、または点数の小さい順。順番モードでは上がれない点数を飛ばして範囲の最後から先頭へ戻ります。範囲適用・ルール変更・再起動時は先頭から。復習優先はランダムのみ利用できます。指定点数の「次へ」は同じ点数を再練習します。
-- 「標準アレンジを復習する点数を優先」: 選択範囲内の復習待ちから70%の確率で出題。残りは通常抽選。同じ点数の連続出題は、候補が1つのとき以外避けます。標準アレンジで回答すると復習待ちを解除。
-- 合法な回答は候補と一致しなくても、大きな「正解」の表示に統一。標準アレンジ一致率はルール別の標準アレンジ一致数÷更新後の回答数。以前の成績は保持しますが、標準との一致は過去の記録から判定できないため新たに集計します。入力中は正解と成績を確定せず、「回答する」で1回答を保存し、未回答で次に進んでも集計しません。「1投戻す」「クリア」は直前回答の集計も取り消します。
-- 「回答する」を押すと正解候補と解説を表示。入力だけでは候補を表示しません。
-- 出題・残り・入力本数は画面上部に追従表示され、入力中も確認できます。
-- 入力は実際と同じ数字配置のダーツボードをタップ。シングル・ダブル・トリプル・ブルの各エリアを直接選びます。ダブル・トリプル・ブルはタップしやすい幅に広げ、直前の選択を黄色で表示します。DOの外側ブルは25点、MO/SOのブルは内側も外側も50点です。得点なしはMISSボタン。
-- 「指定点数を練習」の「点数を選ぶ」で一覧画面を開き、点数帯と数字のボタンから2〜180の任意点数を選べます。3本で上がれない点数も選択でき、「3本で上がれない」で答え合わせできます。指定練習の回答もルール別の成績に含まれます。
-- 解説には最初の狙いを外した場合（同じ数字のシングル、隣の数字のシングル、得点なし、DOブル狙いのSB）の残り点数とアレンジを表示。残り2本で上がれない場合はその旨を示し、可能なら次のラウンドの3本ルートも併記します。
-- 成績画面には標準アレンジと異なる回答だった点数と回数を表示します。標準アレンジで復習した点数も履歴に残り、ボタンから再練習できます。
-- 成績・復習待ち・設定・自分アレンジは端末に保存。既存の自分アレンジ保存キーは引き継ぎ、合法なデータを表示します。
-
-## 起動
-
-Python 3とNode.js（テスト用）があれば依存インストールは不要です。
-
-```sh
-cd /workspace/darts-arrange-practice
-python3 -m http.server 8000 --bind 127.0.0.1
-```
-
-ファイルを直接開く方法では、JSON取得とPWAが動作しません。ローカルHTTP、公開時はHTTPSを使用します。すべてのリソースは相対パスなのでGitHub Pagesのリポジトリ配下にも対応します。
-
-## iPhone・オフライン
-
-HTTPSで公開したアプリをSafariで開き、「オフライン利用の準備ができました」を確認して、共有 →「ホーム画面に追加」。初回は通信が必要です。その後は画面、JSON、練習、成績保存がオフラインで動作します。更新通知が出たらアプリの窓をすべて閉じて再起動してください。
-
-公開用のGitHub Pagesワークフローは現在ありません。公開する場合はGitHub Settings → Pagesで `Deploy from a branch` を選び、対象ブランチの `/ (root)` を指定します。この変更の実装・テストだけでは公開されません。
-
-## テスト
-
-```sh
-node --test tests/core.test.cjs
-node --test tests/browser.test.cjs
-```
-
-ブラウザーテストはPython 3、Playwright、Chromiumが必要です。このクラウド環境には導入済み。Chromiumの別パスは `CHROMIUM_PATH` で指定できます。他の環境では例えばリポジトリ外へPlaywrightをインストールして使えます。
-
-```sh
-npm install --prefix /tmp/darts-browser-tests playwright@1.62.1
-NODE_PATH=/tmp/darts-browser-tests/node_modules CHROMIUM_PATH=/usr/bin/chromium node --test tests/browser.test.cjs
-```
-
-単体テストはJSON全179行、DO/MO/SO、バースト、不正ルート、点数帯・復習抽選を確認。ブラウザーテストはiPhoneサイズのChromiumで通常の静的サーバーとサブパスを使い、操作・成績の取り消し・保存・切替・170のブル終了・新しい窓でのオフライン起動を確認します。iPhone実機のSafariとホーム画面追加は別途実機で確認してください。
-
-全ファイル確認結果、JSONの修正箇所は [docs/code-review.md](docs/code-review.md) に記載しています。
-
-アプリ名は「OUT」。自分アレンジは練習と同じボードで最大3投を入力し、合計点を自動計算して登録します。登録一覧は別画面です。登録したルートで上がると「マイアレンジでフィニッシュ！」と紙吹雪を表示します。標準と自分の両方に一致した場合はマイアレンジの表示を優先します。
-
-回答中の「次の問題」は未回答の入力を破棄して次を出題し、成績には記録しません。指定点数の練習中に飛ばすと、設定範囲の通常出題へ戻ります。回答後の「次の問題」では従来どおり指定点数を再練習します。
-
-「アレンジ表」タブは現在のルールの2〜180点を縦にスクロールして確認できます。点数帯で絞り込み、標準ルート・自分の登録ルート・3本では上がれない点数を表示します。点数ボタンから指定練習を始められます。
-
-組み立ての解説は各投の狙いと投げた後の残り点数を表示します。最後のダブルをシングルに外した場合の残り・次のダブル、奇数残りへの注意、ブルの内外とアウト方式の違いも具体的に表示します。余分な投がない場合は、その場で再挑戦できることを意味しません。
+  assert.equal(await page.locator('#statsCount').textContent(),'0標準アレンジ / 0回答');
+  assert.equal(await page.locator('#standardAnswer').isVisible(),false);
+  await submit();assert.ok(await screen('result'));await fits('result');
+  await page.setViewportSize({width:320,height:568});await fits('result');await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.locator('#statsCount').textContent(),'1標準アレンジ / 1回答');
+  assert.equal(await page.locator('#resultText').textContent(),'正解');
+  assert.equal(await page.locator('#resultDetail').textContent(),'ナイスアレンジ！');
+  assert.equal(await page.locator('.celebration span').count(),24);
+  assert.equal(await page.locator('#statusBadge').count(),0);
+  assert.ok(await page.locator('#resultText').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=30));
+  assert.match(await page.locator('#submittedRoute').textContent(),/D20/);
+  await page.getByRole('button',{name:'回答を直す',exact:true}).click();
+  assert.equal(await page.locator('.celebration').count(),0);
+  assert.ok(await screen('practice'));assert.equal(await page.locator('#statsCount').textContent(),'0標準アレンジ / 0回答');
+  await enter('S',20);await enter('D',10);await submit();
+  assert.equal(await page.locator('#resultText').textContent(),'正解');
+  assert.equal(await page.locator('.celebration').count(),0);
+  assert.equal(await page.locator('#statsCount').textContent(),'0標準アレンジ / 1回答');
+  assert.match(await page.locator('#mistakeScores').textContent(),/40点.*1回/);
+  assert.equal(await page.evaluate(()=>progress[currentMode()][40].review),true);
+  await page.getByRole('button',{name:'回答を直す',exact:true}).click();
+  await page.getByRole('button',{name:'クリア',exact:true}).click();
+  for(let i=0;i<3;i++)await page.getByRole('button',{name:'MISS',exact:true}).click();
+  await submit();assert.match(await page.locator('#reviewScores').textContent(),/1点数/);
+  await next();assert.ok(await screen('practice'));await enter('D',20);await submit();
+  assert.equal(await page.locator('#statsCount').textContent(),'1標準アレンジ / 2回答');
+  await page.getByRole('button',{name:'成績',exact:true}).click();await fits('stats');
+  assert.match(await page.locator('#mistakeScores').textContent(),/40点.*1回/);
+  await page.locator('#mistakeScores button').first().click();assert.equal(await page.locator('#startScore').textContent(),'40');
+  await page.getByRole('button',{name:'成績',exact:true}).click();
+  await page.setViewportSize({width:320,height:568});await fits('stats');await page.setViewportSize({width:390,height:844});
+  await page.getByRole('button',{name:'練習',exact:true}).click();assert.ok(await screen('practice'));
+  await page.getByRole('button',{name:'成績',exact:true}).click();
+  await page.getByRole('button',{name:'自分アレンジ',exact:true}).click();
+  await page.locator('#customBoardHost [data-token="T12"]').click();
+  await page.locator('#customBoardHost [data-token="D18"]').click();
+  assert.equal(await page.locator('#customScore').textContent(),'72点');
+  await page.getByRole('button',{name:'登録',exact:true}).click();
+  assert.match(await page.locator('#savedList').textContent(),/T12 → D18/);await fits('custom');
+  await page.setViewportSize({width:320,height:568});await fits('custom');await page.setViewportSize({width:390,height:844});
+  await page.locator('#customBoardHost [data-token="S9"]').last().click();
+  await page.getByRole('button',{name:'登録',exact:true}).click();assert.match(await page.locator('#customMessage').textContent(),/アウト条件/);
+  await page.getByRole('button',{name:'クリア',exact:true}).click();
+  await page.getByRole('button',{name:'登録一覧',exact:true}).click();await fits('saved');
+  assert.match(await page.locator('#savedList').textContent(),/72点: T12 → D18/);
+  await page.getByRole('button',{name:'アレンジ表',exact:true}).click();
+  await fits('arrangements');
+  assert.equal(await page.locator('.arrangementRow').count(),179);
+  assert.match(await page.locator('.arrangementRow').filter({has:page.getByRole('button',{name:'72点を練習',exact:true})}).textContent(),/MY: T12 → D18/);
+  await page.locator('#arrangementBand').selectOption('121-170');
+  assert.equal(await page.locator('.arrangementRow').count(),50);
+  assert.match(await page.locator('.arrangementRow').filter({has:page.getByRole('button',{name:'169点を練習',exact:true})}).textContent(),/3本では上がれません/);
+  await page.setViewportSize({width:320,height:568});await fits('arrangements');
+  const scrollable=await page.locator('#arrangementList').evaluate(el=>{el.scrollTop=el.scrollHeight;return el.scrollTop>0;});
+  assert.equal(scrollable,true);
+  await page.getByRole('button',{name:'170点を練習',exact:true}).click();
+  assert.equal(await page.locator('#startScore').textContent(),'170');
+  await page.setViewportSize({width:390,height:844});
+  await chooseTarget(72);await enter('T',12);await enter('D',18);await submit();
+  assert.equal(await page.locator('#resultDetail').textContent(),'マイアレンジでフィニッシュ！');
+  assert.equal(await page.locator('.celebration span').count(),24);
+  await range(120,170,'sequential');
+  const beforeSkip=await page.locator('#statsCount').textContent();
+  await enter('S',20);await next();
+  assert.equal(await page.locator('#startScore').textContent(),'121');
+  assert.equal(await page.locator('#statsCount').textContent(),beforeSkip);
+  assert.equal(await page.locator('#inputThrowCount').textContent(),'0');
+  await range(121,170,'sequential');assert.equal(await page.locator('#startScore').textContent(),'121');
+  assert.equal(await page.locator('#reviewPriority').isDisabled(),true);
+  await page.getByRole('button',{name:'3本で上がれない',exact:true}).click();
+  assert.equal(await page.locator('#resultText').textContent(),'アレンジを確認');
+  const footer=await page.locator('#resultScreen .resultNav button').allTextContents();
+  assert.deepEqual(footer,['回答を直す','次の問題']);
+  assert.equal(await page.locator('#explanationScreen').count(),0);
+  await fits('result');
+  assert.match(await page.locator('#explainText').textContent(),/1投目 T20 → 残り61点.*2投目 T11 → 残り28点.*3投目 D14 → 上がり/);
+  assert.match(await page.locator('.routeTip').textContent(),/S14.*14点.*次ラウンド: D7/);
+  assert.equal(await page.locator('.missItem:visible').count(),4);
+  const cards=await page.locator('.missItem:visible').evaluateAll(items=>items.map(el=>el.getBoundingClientRect().x));
+  assert.ok(cards.every(x=>Math.abs(x-cards[0])<1),'miss examples use one column');
+  assert.match((await page.locator('.missItem:visible').allTextContents()).join(' '),/S20.*101点/);
+  await page.setViewportSize({width:320,height:568});await fits('result');await page.setViewportSize({width:390,height:844});
+  await next();assert.equal(await page.locator('#startScore').textContent(),'122');
+  await page.getByRole('button',{name:'3本で上がれない',exact:true}).click();await next();
+  assert.equal(await page.locator('#startScore').textContent(),'123');
+  await range(158,164,'sequential');assert.equal(await page.locator('#startScore').textContent(),'158');
+  await page.getByRole('button',{name:'3本で上がれない',exact:true}).click();await next();
+  assert.equal(await page.locator('#startScore').textContent(),'160');
+  await page.reload();await ready();assert.equal(await page.locator('#questionOrder').inputValue(),'sequential');
+  assert.equal(await page.locator('#rangeMin').inputValue(),'158');
+  await chooseTarget(169);await page.getByRole('button',{name:'3本で上がれない',exact:true}).click();
+  assert.match(await page.locator('#resultText').textContent(),/正解/);await next();
+  assert.equal(await page.locator('#startScore').textContent(),'169');
+  await settings();await page.locator('#quickMode').selectOption('fat_master');
+  await chooseTarget(50);assert.equal(await page.locator('#dartboardHost [data-outer-bull]').getAttribute('data-token'),'BULL');
+  await outerBull();await submit();assert.match(await page.locator('#resultText').textContent(),/正解/);
+  await chooseTarget(60);await enter('T',20);await submit();assert.match(await page.locator('#resultText').textContent(),/正解/);
+  await settings();await page.locator('#quickMode').selectOption('fat_single');
+  await chooseTarget(40);await enter('S',20);await enter('S',20);await submit();assert.match(await page.locator('#resultText').textContent(),/正解/);
+  await settings();await page.locator('#quickMode').selectOption('sep_double');
+  await chooseTarget(65);await outerBull();await enter('D',20);await submit();
+  assert.match(await page.locator('#resultText').textContent(),/正解/);
+  await range(170,170);await enter('T',20);await enter('T',20);await page.locator('#dartboardHost').getByRole('button',{name:'ブル（50点）',exact:true}).click();await submit();
+  assert.match(await page.locator('#resultText').textContent(),/正解/);
+  await page.waitForFunction(()=>navigator.serviceWorker.controller!==null);
+  await page.close();await context.setOffline(true);page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(base);await ready();assert.equal(await page.evaluate(()=>checkoutByScore.size),179);
+  await fits('practice');await enter('T',20);await enter('T',20);await page.locator('#dartboardHost').getByRole('button',{name:'ブル（50点）',exact:true}).click();await submit();
+  assert.match(await page.locator('#resultText').textContent(),/正解/);await fits('result');
+  await page.evaluate(()=>{progress[currentMode()]=Object.fromEntries(Array.from({length:24},(_,i)=>[i+2,{attempts:1,correct:1,standardAttempts:1,standardCorrect:0,review:true}]));updateStats();});
+  await page.getByRole('button',{name:'成績',exact:true}).click();
+  await page.setViewportSize({width:320,height:568});await fits('stats');
+  assert.equal(await page.locator('#mistakeScores button').count(),9);
+  await page.getByRole('button',{name:'次の点数',exact:true}).click();
+  assert.match(await page.locator('#mistakeScores button').first().textContent(),/^11点/);
+  const recoveryTips=await page.evaluate(()=>{
+    const tips={};
+    for(const mode of PracticeCore.MODES){
+      document.querySelector(`input[name="mode"][value="${mode}"]`).checked=true;
+      startTargetPractice(30);submitAnswer(true);
+      tips[mode]=document.querySelector('.routeTip').textContent;
+      startTargetPractice(50);submitAnswer(true);
+      tips[mode+'Bull']=document.querySelector('.routeTip').textContent;
+    }
+    return tips;
+  });
+  assert.match(recoveryTips.fat_master,/S15.*15点.*T5/);
+  assert.match(recoveryTips.sep_double,/S15.*15点.*S7 → D4/);
+  assert.match(recoveryTips.sep_doubleBull,/インブル50点.*アウターブル.*25点/);
+  assert.match(recoveryTips.fat_masterBull,/内外とも50点/);
+  const overflowingResults=await page.evaluate(()=>{
+    const issues=[];
+    for(const mode of PracticeCore.MODES){
+      document.querySelector(`input[name="mode"][value="${mode}"]`).checked=true;
+      for(let score=2;score<=180;score++){
+        startTargetPractice(score);submitAnswer(true);
+        const el=document.getElementById('resultScreen');
+        if(el.scrollHeight>el.clientHeight+1)issues.push({mode,score});
+      }
+    }
+    return issues;
+  });
+  assert.deepEqual(overflowingResults,[], 'all combined result screens fit');
+  assert.deepEqual(errors,[]);assert.deepEqual(failed,[]);
+ }finally{
+  if(browser)await browser.close();
+  server.kill('SIGTERM');await once(server,'exit');
+ }
+});

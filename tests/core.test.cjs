@@ -73,3 +73,32 @@ test('sequential order starts at the bottom, skips impossible scores and wraps',
  assert.equal(Core.nextSequential([40],40),40);
  assert.equal(Core.nextSequential([],null),null);
 });
+
+test('recovery prefers the reference table but respects remaining darts and mode',()=>{
+ const provider=mode=>score=>{
+  const row=rows.find(row=>row.score===score);
+  const key=mode==='sep_double'?'doubleOut':'masterOutFatBull';
+  return row ? [row[key].route.map(Core.normalize)] : [];
+ };
+ for(const mode of ['sep_double','fat_master']) for(const row of rows){
+  const standards=provider(mode)(row.score);
+  if(!Core.validRoute(row.score,standards[0],mode))continue;
+  for(const plan of Core.missPlans(row.score,standards[0],mode,provider(mode))){
+   if(plan.done){assert.equal(plan.route,null);continue;}
+   const reference=provider(mode)(plan.remaining)[0];
+   if(plan.route){
+    assert.ok(plan.route.length<=2);
+    assert.ok(Core.validRoute(plan.remaining,plan.route,mode));
+    if(reference?.length && reference.length<=2)assert.deepEqual(plan.route,reference);
+   }else assert.equal(Core.generatedRoute(plan.remaining,mode,2),null);
+   if(plan.nextTurn){
+    assert.ok(Core.validRoute(plan.remaining,plan.nextTurn,mode));
+    if(reference?.length)assert.deepEqual(plan.nextTurn,reference);
+   }
+  }
+ }
+ assert.deepEqual(Core.preferredRoute(60,'fat_master',1,[['T20']]),['T20']);
+ assert.equal(Core.preferredRoute(60,'sep_double',1,[['T20']]),null);
+ assert.deepEqual(Core.preferredRoute(20,'fat_single',1,[['S20']]),['S20']);
+ assert.equal(Core.preferredRoute(20,'sep_double',1,[['S20']]).at(-1),'D10');
+});
